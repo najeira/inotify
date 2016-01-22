@@ -102,11 +102,7 @@ func (w *Watcher) Add(name string) error {
 		return errors.New("inotify instance already closed")
 	}
 
-	const agnosticEvents = syscall.IN_MOVED_TO | syscall.IN_MOVED_FROM |
-		syscall.IN_CREATE | syscall.IN_ATTRIB | syscall.IN_MODIFY |
-		syscall.IN_MOVE_SELF | syscall.IN_DELETE | syscall.IN_DELETE_SELF
-
-	var flags uint32 = agnosticEvents
+	var flags uint32 = ALL_EVENTS
 
 	w.mu.Lock()
 	watchEntry, found := w.watches[name]
@@ -287,7 +283,7 @@ func (w *Watcher) readEvents() {
 // against files that do not exist.
 func (e *Event) ignoreLinux(w *Watcher, wd int32, mask uint32) bool {
 	// Ignore anything the inotify API says to ignore
-	if mask&syscall.IN_IGNORED == syscall.IN_IGNORED {
+	if mask&IGNORED == IGNORED {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		name := w.paths[int(wd)]
@@ -302,8 +298,8 @@ func (e *Event) ignoreLinux(w *Watcher, wd int32, mask uint32) bool {
 	// *Note*: this was put in place because it was seen that a MODIFY
 	// event was sent after the DELETE. This ignores that MODIFY and
 	// assumes a DELETE will come or has come if the file doesn't exist.
-	remove := mask&syscall.IN_DELETE_SELF == syscall.IN_DELETE_SELF || mask&syscall.IN_DELETE == syscall.IN_DELETE
-	rename := mask&syscall.IN_MOVE_SELF == syscall.IN_MOVE_SELF || mask&syscall.IN_MOVED_FROM == syscall.IN_MOVED_FROM
+	remove := mask&DELETE_SELF == DELETE_SELF || mask&DELETE == DELETE
+	rename := mask&MOVE_SELF == MOVE_SELF || mask&MOVED_FROM == MOVED_FROM
 	if !(remove || rename) {
 		_, statErr := os.Lstat(e.Name)
 		return os.IsNotExist(statErr)
@@ -312,21 +308,106 @@ func (e *Event) ignoreLinux(w *Watcher, wd int32, mask uint32) bool {
 }
 
 func (e *Event) IsCreate() bool {
-	return e.Mask&syscall.IN_CREATE == syscall.IN_CREATE || e.Mask&syscall.IN_MOVED_TO == syscall.IN_MOVED_TO
+	return e.Mask&CREATE == CREATE || e.Mask&MOVED_TO == MOVED_TO
 }
 
 func (e *Event) IsRemove() bool {
-	return e.Mask&syscall.IN_DELETE_SELF == syscall.IN_DELETE_SELF || e.Mask&syscall.IN_DELETE == syscall.IN_DELETE
+	return e.Mask&DELETE_SELF == DELETE_SELF || e.Mask&DELETE == DELETE
 }
 
 func (e *Event) IsWrite() bool {
-	return e.Mask&syscall.IN_MODIFY == syscall.IN_MODIFY
+	return e.Mask&MODIFY == MODIFY
 }
 
 func (e *Event) IsRename() bool {
-	return e.Mask&syscall.IN_MOVE_SELF == syscall.IN_MOVE_SELF || e.Mask&syscall.IN_MOVED_FROM == syscall.IN_MOVED_FROM
+	return e.Mask&MOVE_SELF == MOVE_SELF || e.Mask&MOVED_FROM == MOVED_FROM
 }
 
 func (e *Event) IsChmod() bool {
-	return e.Mask&syscall.IN_ATTRIB == syscall.IN_ATTRIB
+	return e.Mask&ATTRIB == ATTRIB
+}
+
+// String formats the event in the form
+// "filename: 0xEventMask = ACCESS|ATTRIB_|..."
+func (e *Event) String() string {
+	var events string = ""
+
+	m := e.Mask
+	for _, b := range eventBits {
+		if m&b.Value == b.Value {
+			m &^= b.Value
+			events += "|" + b.Name
+		}
+	}
+
+	if m != 0 {
+		events += fmt.Sprintf("|%#x", m)
+	}
+	if len(events) > 0 {
+		events = " == " + events[1:]
+	}
+
+	return fmt.Sprintf("%q: %#x%s", e.Name, e.Mask, events)
+}
+
+const (
+	// Options for inotify_init() are not exported
+	// CLOEXEC    uint32 = syscall.IN_CLOEXEC
+	// NONBLOCK   uint32 = syscall.IN_NONBLOCK
+
+	// Options for AddWatch
+	DONT_FOLLOW uint32 = syscall.IN_DONT_FOLLOW
+	ONESHOT     uint32 = syscall.IN_ONESHOT
+	ONLYDIR     uint32 = syscall.IN_ONLYDIR
+
+	// The "IN_MASK_ADD" option is not exported, as AddWatch
+	// adds it automatically, if there is already a watch for the given path
+	// MASK_ADD      uint32 = syscall.IN_MASK_ADD
+
+	// Events
+	ACCESS        uint32 = syscall.IN_ACCESS
+	ALL_EVENTS    uint32 = syscall.IN_ALL_EVENTS
+	ATTRIB        uint32 = syscall.IN_ATTRIB
+	CLOSE         uint32 = syscall.IN_CLOSE
+	CLOSE_NOWRITE uint32 = syscall.IN_CLOSE_NOWRITE
+	CLOSE_WRITE   uint32 = syscall.IN_CLOSE_WRITE
+	CREATE        uint32 = syscall.IN_CREATE
+	DELETE        uint32 = syscall.IN_DELETE
+	DELETE_SELF   uint32 = syscall.IN_DELETE_SELF
+	MODIFY        uint32 = syscall.IN_MODIFY
+	MOVE          uint32 = syscall.IN_MOVE
+	MOVED_FROM    uint32 = syscall.IN_MOVED_FROM
+	MOVED_TO      uint32 = syscall.IN_MOVED_TO
+	MOVE_SELF     uint32 = syscall.IN_MOVE_SELF
+	OPEN          uint32 = syscall.IN_OPEN
+
+	// Special events
+	ISDIR      uint32 = syscall.IN_ISDIR
+	IGNORED    uint32 = syscall.IN_IGNORED
+	Q_OVERFLOW uint32 = syscall.IN_Q_OVERFLOW
+	UNMOUNT    uint32 = syscall.IN_UNMOUNT
+)
+
+var eventBits = []struct {
+	Value uint32
+	Name  string
+}{
+	{ACCESS, "ACCESS"},
+	{ATTRIB, "ATTRIB"},
+	{CLOSE, "CLOSE"},
+	{CLOSE_NOWRITE, "CLOSE_NOWRITE"},
+	{CLOSE_WRITE, "CLOSE_WRITE"},
+	{CREATE, "CREATE"},
+	{DELETE, "DELETE"},
+	{DELETE_SELF, "DELETE_SELF"},
+	{MODIFY, "MODIFY"},
+	{MOVE, "MOVE"},
+	{MOVED_FROM, "MOVED_FROM"},
+	{MOVED_TO, "MOVED_TO"},
+	{MOVE_SELF, "MOVE_SELF"},
+	{OPEN, "OPEN"},
+	{ISDIR, "ISDIR"},
+	{IGNORED, "IGNORED"},
+	{Q_OVERFLOW, "Q_OVERFLOW"},
+	{UNMOUNT, "UNMOUNT"},
 }
